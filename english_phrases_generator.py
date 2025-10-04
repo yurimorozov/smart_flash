@@ -28,13 +28,6 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnableConfig
 
 
-class TopicCategory(str, Enum):
-    """Enumeration of phrase topic categories"""
-    BUSINESS = "business"
-    COMPUTERS = "computers"
-    SOFTWARE = "software"
-
-
 class DifficultyLevel(str, Enum):
     """Enumeration of language difficulty levels"""
     A1 = "A1"
@@ -45,44 +38,42 @@ class DifficultyLevel(str, Enum):
     C2 = "C2"
 
 
-class Phrase(BaseModel):
-    """Individual phrase model with metadata"""
-    text: str = Field(..., description="The actual phrase or sentence")
-    topic: TopicCategory = Field(..., description="Topic category of the phrase")
-    complexity_score: int = Field(ge=1, le=10, description="Complexity score from 1-10")
-    key_vocabulary: List[str] = Field(default_factory=list, description="Key vocabulary words in the phrase")
-    
-    @field_validator('text')
+class PhraseEntry(BaseModel):
+    """Single phrase with English text and Russian translation"""
+    english: str = Field(..., description="English phrase or sentence")
+    russian: str = Field(..., description="Russian translation of the phrase")
+
+    @field_validator('english')
     @classmethod
-    def validate_text(cls, v: str) -> str:
-        if len(v.strip()) < 10:
-            raise ValueError("Phrase must be at least 10 characters long")
-        if len(v.strip()) > 200:
-            raise ValueError("Phrase must be no longer than 200 characters")
-        return v.strip()
+    def validate_english(cls, value: str) -> str:
+        stripped = value.strip()
+        if len(stripped) < 10:
+            raise ValueError("English phrase must be at least 10 characters long")
+        if len(stripped) > 200:
+            raise ValueError("English phrase must be no longer than 200 characters")
+        return stripped
+
+    @field_validator('russian')
+    @classmethod
+    def validate_russian(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Russian translation cannot be empty")
+        if len(stripped) > 200:
+            raise ValueError("Russian translation must be no longer than 200 characters")
+        return stripped
 
 
 class PhrasesCollection(BaseModel):
-    """Collection of generated phrases with metadata"""
-    phrases: List[Phrase] = Field(..., description="List of generated phrases")
-    level: DifficultyLevel = Field(default=DifficultyLevel.B2, description="Target language level")
-    total_count: int = Field(..., description="Total number of phrases")
-    generation_timestamp: datetime = Field(default_factory=datetime.now)
-    
+    """Collection of generated phrases with translations"""
+    phrases: List[PhraseEntry] = Field(..., description="List of phrases with translations")
+
     @field_validator('phrases')
     @classmethod
-    def validate_phrase_count(cls, v: List[Phrase]) -> List[Phrase]:
-        if len(v) < 40:
-            raise ValueError(f"Expected at least 40 phrases, got {len(v)}")
-        return v
-    
-    @field_validator('total_count')
-    @classmethod
-    def validate_total_count(cls, v: int, info) -> int:
-        # Note: In Pydantic V2, we use info.data instead of values
-        if 'phrases' in info.data and v != len(info.data['phrases']):
-            raise ValueError("total_count must match the actual number of phrases")
-        return v
+    def validate_phrases(cls, phrases: List[PhraseEntry]) -> List[PhraseEntry]:
+        if len(phrases) < 40:
+            raise ValueError(f"Expected at least 40 phrases, got {len(phrases)}")
+        return phrases
 
 
 class GraphState(TypedDict):
@@ -166,30 +157,30 @@ def generate_phrases_node(state: GraphState) -> GraphState:
         # Create provider
         provider = LangChainProvider(state["provider"], api_key, state["model"])
         
-        # Define prompts
+    # Define prompts
         system_prompt = """
-You are an expert English language teacher. 
-Your task is to generate practical, real-world phrases for business and technology contexts.
-        """
-        
-        user_prompt = f"""Generate exactly {state['target_count']} English phrases or sentences for {state['level'].value} level learners.
+You are an expert English language teacher and translator.
+Provide intermediate (B2) level English phrases that are useful in business and technology contexts.
+For each English phrase you create, supply a natural Russian translation that preserves meaning and tone.
+Return data strictly as JSON matching the provided schema.
+    """
 
-Focus on these topics:
+        user_prompt = f"""
+Generate exactly {state['target_count']} unique English phrases or sentences for {state['level'].value} level learners.
+
+Focus on these topic areas:
 1. Business communications: emails, meetings, presentations, client interactions
 2. Computers and technology: troubleshooting, system administration, user interfaces
 3. Software development: coding practices, debugging, version control, testing
 
 Requirements:
-- B2 level complexity (intermediate-upper intermediate)
-- Practical and useful for real-world situations
-- Mix of formal and semi-formal register
-- Vary sentence structures and lengths
-- Include relevant technical and business vocabulary
-
-For each phrase, also identify:
-- The main topic category (business, computers, or software)
-- Complexity score (1-10, targeting 5-7)
-- 1-3 key vocabulary words from the phrase"""
+- {state['level'].value} level complexity (upper-intermediate)
+- Practical, real-world phrasing with a mix of formal and semi-formal register
+- Vary sentence structures and lengths (10–25 words preferred)
+- Do not include numbering or metadata inside the phrase text itself
+- Provide a fluent Russian translation for each phrase that conveys the same intent
+- Respond strictly in valid JSON following the schema instructions
+    """
         
         # Generate structured output
         phrases_collection = provider.generate_structured_phrases(system_prompt, user_prompt)
@@ -223,14 +214,19 @@ def validate_phrases_node(state: GraphState) -> GraphState:
     valid_phrases = 0
     for i, phrase in enumerate(collection.phrases, 1):
         try:
-            # Validate phrase length
-            if len(phrase.text.strip()) < 10:
-                errors.append(f"Phrase {i} too short: '{phrase.text[:30]}...'")
-            elif len(phrase.text.strip()) > 200:
-                errors.append(f"Phrase {i} too long: '{phrase.text[:30]}...'")
+            english = phrase.english.strip()
+            russian = phrase.russian.strip()
+
+            if len(english) < 10:
+                errors.append(f"Phrase {i} English text too short: '{english[:30]}...'")
+            elif len(english) > 200:
+                errors.append(f"Phrase {i} English text too long: '{english[:30]}...'")
+            elif not russian:
+                errors.append(f"Phrase {i} missing Russian translation")
+            elif len(russian) > 200:
+                errors.append(f"Phrase {i} Russian translation too long: '{russian[:30]}...'")
             else:
                 valid_phrases += 1
-                
         except Exception as e:
             errors.append(f"Phrase {i} validation error: {e}")
     
@@ -279,34 +275,14 @@ def save_output_node(state: GraphState) -> GraphState:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write("English B2 Level Phrases for Learning\n")
             f.write("=" * 50 + "\n")
-            f.write(f"Generated on: {collection.generation_timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Level: {collection.level.value}\n")
-            f.write(f"Provider: {state['provider']} ({state['model']})\n")
+            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("Topics: Business Communications, Computers, Software Development\n\n")
-            
-            # Group phrases by topic
-            business_phrases = [p for p in collection.phrases if p.topic == TopicCategory.BUSINESS]
-            computer_phrases = [p for p in collection.phrases if p.topic == TopicCategory.COMPUTERS]
-            software_phrases = [p for p in collection.phrases if p.topic == TopicCategory.SOFTWARE]
-            
-            def write_section(title: str, phrases: List[Phrase], start_num: int):
-                if phrases:
-                    f.write(f"{title}\n")
-                    f.write("-" * len(title) + "\n")
-                    for i, phrase in enumerate(phrases, start_num):
-                        f.write(f"{i:2d}. {phrase.text}\n")
-                        if phrase.key_vocabulary:
-                            f.write(f"    Key words: {', '.join(phrase.key_vocabulary)}\n")
-                        f.write(f"    Complexity: {phrase.complexity_score}/10\n\n")
-                    return start_num + len(phrases)
-                return start_num
-            
-            num = 1
-            num = write_section("BUSINESS COMMUNICATIONS", business_phrases, num)
-            num = write_section("COMPUTERS & TECHNOLOGY", computer_phrases, num)
-            num = write_section("SOFTWARE DEVELOPMENT", software_phrases, num)
-            
-            f.write(f"Total phrases: {len(collection.phrases)}\n")
+
+            for i, phrase in enumerate(collection.phrases, 1):
+                f.write(f"{i:2d}. {phrase.english}\n")
+                f.write(f"    RU: {phrase.russian}\n")
+
+            f.write(f"\nTotal phrases: {len(collection.phrases)}\n")
             if state["errors"]:
                 f.write(f"\nGeneration issues: {len(state['errors'])}\n")
                 for error in state["errors"]:
@@ -364,7 +340,7 @@ class EnglishPhrasesGenerator:
         
         # Set default models
         if not model:
-            model = "gpt-3.5-turbo" if provider == "openai" else "claude-3-sonnet-20240229"
+            model = "gpt-4.1" if provider == "openai" else "claude-3-sonnet-20240229"
         
         # Initial state
         initial_state: GraphState = {
@@ -372,7 +348,7 @@ class EnglishPhrasesGenerator:
             "model": model,
             "api_key": api_key,
             "target_count": target_count,
-            "level": DifficultyLevel.B2,
+            "level": DifficultyLevel.C1,
             "phrases_collection": None,
             "raw_response": None,
             "retry_count": 0,
@@ -440,12 +416,8 @@ def main():
         if result['success'] and result['phrases_collection']:
             print(f"\n🔍 Preview (first 5 phrases):")
             for i, phrase in enumerate(result['phrases_collection'].phrases[:5], 1):
-                print(f"{i:2d}. {phrase.text}")
-                print(f"    Topic: {phrase.topic.value} | Complexity: {phrase.complexity_score}/10")
-                if phrase.key_vocabulary:
-                    print(f"    Key words: {', '.join(phrase.key_vocabulary)}")
-                print()
-            
+                print(f"{i:2d}. {phrase.english}")
+                print(f"    RU: {phrase.russian}")
             if len(result['phrases_collection'].phrases) > 5:
                 print("    ... (see output file for complete list)")
         
