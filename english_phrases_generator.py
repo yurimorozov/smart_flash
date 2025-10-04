@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import List, Dict, Optional, TypedDict, Annotated, Literal, Any
 from enum import Enum
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
@@ -52,8 +52,9 @@ class Phrase(BaseModel):
     complexity_score: int = Field(ge=1, le=10, description="Complexity score from 1-10")
     key_vocabulary: List[str] = Field(default_factory=list, description="Key vocabulary words in the phrase")
     
-    @validator('text')
-    def validate_text(cls, v):
+    @field_validator('text')
+    @classmethod
+    def validate_text(cls, v: str) -> str:
         if len(v.strip()) < 10:
             raise ValueError("Phrase must be at least 10 characters long")
         if len(v.strip()) > 200:
@@ -68,15 +69,18 @@ class PhrasesCollection(BaseModel):
     total_count: int = Field(..., description="Total number of phrases")
     generation_timestamp: datetime = Field(default_factory=datetime.now)
     
-    @validator('phrases')
-    def validate_phrase_count(cls, v):
+    @field_validator('phrases')
+    @classmethod
+    def validate_phrase_count(cls, v: List[Phrase]) -> List[Phrase]:
         if len(v) < 40:
             raise ValueError(f"Expected at least 40 phrases, got {len(v)}")
         return v
     
-    @validator('total_count')
-    def validate_total_count(cls, v, values):
-        if 'phrases' in values and v != len(values['phrases']):
+    @field_validator('total_count')
+    @classmethod
+    def validate_total_count(cls, v: int, info) -> int:
+        # Note: In Pydantic V2, we use info.data instead of values
+        if 'phrases' in info.data and v != len(info.data['phrases']):
             raise ValueError("total_count must match the actual number of phrases")
         return v
 
@@ -113,13 +117,6 @@ class LangChainProvider:
                 temperature=0.7,
                 max_tokens=2000
             )
-        elif self.provider_type == "anthropic":
-            return ChatAnthropic(
-                api_key=self.api_key,
-                model=self.model,
-                temperature=0.7,
-                max_tokens=2000
-            )
         else:
             raise ValueError(f"Unsupported provider: {self.provider_type}")
     
@@ -150,24 +147,30 @@ def initialize_state(state: GraphState) -> GraphState:
     state["raw_response"] = None
     return state
 
+def get_api_key(api_path):
+    token_file_path = os.environ.get(api_path)
+
+    with open(token_file_path, 'r') as f:
+        api_token = f.read().strip()    
+    return api_token
 
 def generate_phrases_node(state: GraphState) -> GraphState:
     """Generate phrases using the specified AI provider"""
     try:
         # Get API key
-        api_key = state["api_key"] or os.getenv(
-            "OPENAI_API_KEY" if state["provider"] == "openai" else "ANTHROPIC_API_KEY"
-        )
+        api_key = get_api_key(api_path="OPENAI_TOKEN_PATH")
         
         if not api_key:
-            raise ValueError(f"{state['provider'].upper()}_API_KEY is required")
+            raise ValueError(f"{state['provider'].upper()}_TOKEN_PATH is required")
         
         # Create provider
         provider = LangChainProvider(state["provider"], api_key, state["model"])
         
         # Define prompts
-        system_prompt = """You are an expert English language teacher specializing in B2 level instruction. 
-Your task is to generate practical, real-world phrases for business and technology contexts."""
+        system_prompt = """
+You are an expert English language teacher. 
+Your task is to generate practical, real-world phrases for business and technology contexts.
+        """
         
         user_prompt = f"""Generate exactly {state['target_count']} English phrases or sentences for {state['level'].value} level learners.
 
@@ -177,7 +180,7 @@ Focus on these topics:
 3. Software development: coding practices, debugging, version control, testing
 
 Requirements:
-- {state['level'].value} level complexity (intermediate-upper intermediate)
+- B2 level complexity (intermediate-upper intermediate)
 - Practical and useful for real-world situations
 - Mix of formal and semi-formal register
 - Vary sentence structures and lengths
@@ -185,8 +188,8 @@ Requirements:
 
 For each phrase, also identify:
 - The main topic category (business, computers, or software)
-- Complexity score (1-10, targeting 5-7 for B2)
-- 2-4 key vocabulary words from the phrase"""
+- Complexity score (1-10, targeting 5-7)
+- 1-3 key vocabulary words from the phrase"""
         
         # Generate structured output
         phrases_collection = provider.generate_structured_phrases(system_prompt, user_prompt)
